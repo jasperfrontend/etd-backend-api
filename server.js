@@ -1,11 +1,19 @@
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const { Pool } = require("pg");
+import supabase from "./supabase.js";
+import dotenv from "dotenv";
+import express from "express";
+import cors from "cors";
+import bodyParser from "body-parser";
+import pg from "pg"; // PostgreSQL client
+
+dotenv.config();
+
+const { Pool } = pg; // Extract Pool from pg
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(bodyParser.json());
 
 // Supabase PostgreSQL connection
 const pool = new Pool({
@@ -350,89 +358,149 @@ app.post("/donate", async (req, res) => {
 
 // 🔹 Move a Player
 app.post("/move", async (req, res) => {
+  const { player } = req.body;
+  let distance = Number(req.body.distance); // 🔥 Convert to number & validate
+
+  if (!["streamer", "danger"].includes(player) || isNaN(distance)) {
+      return res.status(400).json({ error: "Invalid player type or distance." });
+  }
+
   try {
-    const { type, steps } = req.body; // type = 'streamer' | 'danger', steps = int
+      // Get current player position
+      const { data: playerData, error: playerError } = await supabase
+          .from("players")
+          .select("id, position")
+          .eq("type", player)
+          .single();
 
-    // Get current positions
-    const positions = await pool.query(
-      "SELECT type, position FROM players WHERE type IN ('streamer', 'danger')"
-    );
-
-    let streamerPos, dangerPos;
-    positions.rows.forEach((player) => {
-      if (player.type === "streamer") streamerPos = player.position;
-      if (player.type === "danger") dangerPos = player.position;
-    });
-
-    // Calculate new position
-    let newPosition;
-    if (type === "danger") {
-      newPosition = dangerPos + steps;
-      if (newPosition >= streamerPos) {
-        newPosition = streamerPos - 1; // The Danger cannot overtake
+      if (playerError || !playerData) {
+          throw new Error("Failed to fetch player data.");
       }
-    } else {
-      newPosition = streamerPos + steps;
-    }
 
-    // Update position
-    await pool.query("UPDATE players SET position = $1 WHERE type = $2", [newPosition, type]);
+      const playerId = playerData.id;
+      let newPosition = Number(playerData.position) + Number(distance);
 
-    // Log event
-    await pool.query(
-      "INSERT INTO game_events (game_id, event_type, details) VALUES ((SELECT id FROM game_state WHERE status = 'active' LIMIT 1), 'move', $1)",
-      [{ message: `${type} moved ${steps} streets` }]
-    );
+      if (isNaN(newPosition)) {
+          throw new Error(`Invalid position calculation: player=${player}, position=${playerData.position}, distance=${distance}`);
+      }
 
-    res.json({ success: `${type} moved ${steps} streets`, new_position: newPosition });
+      if (player === "danger") {
+          // Prevent The Danger from overtaking The Streamer
+          const { data: streamerData } = await supabase
+              .from("players")
+              .select("position")
+              .eq("type", "streamer")
+              .single();
+
+          if (newPosition >= streamerData.position) {
+              newPosition = streamerData.position - 1;
+              await supabase
+                  .from("players")
+                  .update({ health: supabase.raw("GREATEST(0, health - 25)") })
+                  .eq("type", "streamer");
+          }
+      }
+
+      // Update the player's position safely
+      const { error: updateError } = await supabase
+          .from("players")
+          .update({ position: newPosition })
+          .eq("id", playerId);
+
+      if (updateError) throw updateError;
+
+      // Log move in game_events
+      await supabase.from("game_events").insert([
+          {
+              game_id: (await getActiveGameId()),
+              player_id: playerId,
+              event_type: "move",
+              details: {
+                  message: `${player} moved ${distance} streets.`,
+                  new_position: newPosition,
+              },
+          },
+      ]);
+
+      return res.json({ success: true, player, new_position: newPosition });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to move player." });
+      console.error("Move Error:", error);
+      return res.status(500).json({ error: "Failed to move player." });
   }
 });
+
 
 // 🔹 Move a Player
 app.post("/move", async (req, res) => {
+  const { player } = req.body;
+  let distance = Number(req.body.distance); // Convert to number
+
+  if (!["streamer", "danger"].includes(player) || isNaN(distance)) {
+    console.error("Invalid /move request:", { player, distance });
+    return res.status(400).json({ error: "Invalid player type or distance." });
+}
+
   try {
-    const { type, steps } = req.body; // type = 'streamer' | 'danger', steps = int
+      // Get current positions
+      const { data: playerData, error: playerError } = await supabase
+          .from("players")
+          .select("id, position")
+          .eq("type", player)
+          .single();
 
-    // Get current positions
-    const positions = await pool.query(
-      "SELECT type, position FROM players WHERE type IN ('streamer', 'danger')"
-    );
-
-    let streamerPos, dangerPos;
-    positions.rows.forEach((player) => {
-      if (player.type === "streamer") streamerPos = player.position;
-      if (player.type === "danger") dangerPos = player.position;
-    });
-
-    // Calculate new position
-    let newPosition;
-    if (type === "danger") {
-      newPosition = dangerPos + steps;
-      if (newPosition >= streamerPos) {
-        newPosition = streamerPos - 1; // The Danger cannot overtake
+      if (playerError || !playerData) {
+          throw new Error("Failed to fetch player data.");
       }
-    } else {
-      newPosition = streamerPos + steps;
-    }
 
-    // Update position
-    await pool.query("UPDATE players SET position = $1 WHERE type = $2", [newPosition, type]);
+      const playerId = playerData.id;
+      let newPosition = playerData.position + distance;
 
-    // Log event
-    await pool.query(
-      "INSERT INTO game_events (game_id, event_type, details) VALUES ((SELECT id FROM game_state WHERE status = 'active' LIMIT 1), 'move', $1)",
-      [{ message: `${type} moved ${steps} streets` }]
-    );
+      if (player === "danger") {
+          // Check Streamer's position to prevent overtaking
+          const { data: streamerData } = await supabase
+              .from("players")
+              .select("position")
+              .eq("type", "streamer")
+              .single();
 
-    res.json({ success: `${type} moved ${steps} streets`, new_position: newPosition });
+          if (newPosition >= streamerData.position) {
+              newPosition = streamerData.position - 1; // Move Danger back
+              // Apply damage to the Streamer
+              await supabase
+                  .from("players")
+                  .update({ health: supabase.raw("GREATEST(0, health - 25)") })
+                  .eq("type", "streamer");
+          }
+      }
+
+      // Update the player's position
+      const { error: updateError } = await supabase
+          .from("players")
+          .update({ position: newPosition })
+          .eq("id", playerId);
+
+      if (updateError) throw updateError;
+
+      // Log the move in game_events
+      await supabase.from("game_events").insert([
+          {
+              game_id: (await getActiveGameId()), // Ensure there's an active game
+              player_id: playerId,
+              event_type: "move",
+              details: {
+                  message: `${player} moved ${distance} streets.`,
+                  new_position: newPosition,
+              },
+          },
+      ]);
+
+      return res.json({ success: true, player, new_position: newPosition });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to move player." });
+      console.error("Move Error:", error);
+      return res.status(500).json({ error: "Failed to move player." });
   }
 });
+
 
 // 🔹 Apply Void Effect
 app.post("/void", async (req, res) => {
