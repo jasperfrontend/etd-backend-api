@@ -4,6 +4,7 @@ import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import pg from "pg"; // PostgreSQL client
+import { getActiveGameId } from "./getActiveGameId.js";
 
 dotenv.config();
 
@@ -56,37 +57,36 @@ app.get("/game-state", async (req, res) => {
 
 // 🔹 Start a New Game
 app.post("/start-game", async (req, res) => {
-  try {
-    // Check if a game is already active
-    const checkGame = await pool.query("SELECT * FROM game_state WHERE status = 'active' LIMIT 1");
-    if (checkGame.rows.length > 0) {
-      return res.status(400).json({ error: "A game is already in progress!" });
-    }
+  // Create the Streamer & The Danger in 'players' table
+  const { data: streamer, error: streamerError } = await supabase
+      .from("players")
+      .insert([{ type: "streamer", position: 0, health: 100 }])
+      .select()
+      .single();
 
-    // Create a new game session
-    const newGame = await pool.query(
-      "INSERT INTO game_state (turn, status) VALUES ($1, $2) RETURNING id",
-      [1, "active"]
-    );
+  if (streamerError) return res.status(500).json({ error: "Failed to create Streamer." });
 
-    const gameId = newGame.rows[0].id;
+  const { data: danger, error: dangerError } = await supabase
+      .from("players")
+      .insert([{ type: "danger", position: -2, health: 100 }])
+      .select()
+      .single();
 
-    // Reset players
-    await pool.query("UPDATE players SET position = 0, health = 80 WHERE type = 'streamer'");
-    await pool.query("UPDATE players SET position = -2, health = 100 WHERE type = 'danger'");
+  if (dangerError) return res.status(500).json({ error: "Failed to create The Danger." });
 
-    // Log game start
-    await pool.query(
-      "INSERT INTO game_events (game_id, event_type, details) VALUES ($1, $2, $3)",
-      [gameId, "game_started", { message: "Game session started!" }]
-    );
+  // Start a new game session and assign the players
+  const { data: game, error: gameError } = await supabase
+      .from("game_state")
+      .insert([{ streamer_id: streamer.id, danger_id: danger.id, turn: 0, status: "active" }])
+      .select()
+      .single();
 
-    res.json({ success: "Game started!", game_id: gameId });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to start game." });
-  }
+  if (gameError) return res.status(500).json({ error: "Failed to start the game." });
+
+  res.json({ message: "Game started successfully!", game });
 });
+
+
 
 // 🔹 Process a Game Turn
 app.post("/process-turn", async (req, res) => {
@@ -942,6 +942,7 @@ app.get("/inventory/:playerId", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
+
 
 
 // 🔹 Start the Server
