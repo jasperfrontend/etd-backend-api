@@ -60,7 +60,8 @@ app.post("/start-game", async (req, res) => {
   // Create the Streamer & The Danger in 'players' table
   const { data: streamer, error: streamerError } = await supabase
       .from("players")
-      .insert([{ type: "streamer", position: 0, health: 100 }])
+      .update({ position: 0, health: 80 })
+      .eq("type", "streamer")
       .select()
       .single();
 
@@ -68,16 +69,20 @@ app.post("/start-game", async (req, res) => {
 
   const { data: danger, error: dangerError } = await supabase
       .from("players")
-      .insert([{ type: "danger", position: -2, health: 100 }])
+      .update({ position: -2, health: 100 })
+      .eq("type", "danger")
       .select()
       .single();
 
   if (dangerError) return res.status(500).json({ error: "Failed to create The Danger." });
 
+  // console.log("Streamer & Danger created:", streamer, danger);
+  
+
   // Start a new game session and assign the players
   const { data: game, error: gameError } = await supabase
       .from("game_state")
-      .insert([{ streamer_id: streamer.id, danger_id: danger.id, turn: 0, status: "active" }])
+      .insert({ streamer_id: streamer.id, danger_id: danger.id, turn: 1, status: "active" })
       .select()
       .single();
 
@@ -86,7 +91,37 @@ app.post("/start-game", async (req, res) => {
   res.json({ message: "Game started successfully!", game });
 });
 
+// 🔹 Pause a Game
+app.post("/pause-game", async (req, res) => {
 
+  // Pause an active game session
+  const { data: game, error: gameError } = await supabase
+      .from("game_state")
+      .update({ status: "paused" })
+      .eq("status", "active")
+      .select()
+      .single();
+
+  if (gameError) return res.status(500).json({ error: "Failed to pause the game." });
+
+  res.json({ message: "Game paused successfully!", game });
+});
+
+// 🔹 Resume a Game
+app.post("/resume-game", async (req, res) => {
+
+  // Pause an active game session
+  const { data: game, error: gameError } = await supabase
+      .from("game_state")
+      .update({ status: "active" })
+      .eq("status", "paused")
+      .select()
+      .single();
+
+  if (gameError) return res.status(500).json({ error: "Failed to resume the game." });
+
+  res.json({ message: "Game resumed successfully!", game });
+});
 
 // 🔹 Process a Game Turn
 app.post("/process-turn", async (req, res) => {
@@ -232,12 +267,12 @@ app.post("/inventory/add", async (req, res) => {
 });
 
 app.post("/inventory/remove", async (req, res) => {
-  const { playerId, itemId, amount } = req.body;
+  const { player_id, item_id, amount } = req.body;
 
   const { data: item, error: fetchError } = await supabase
       .from("inventory")
       .select("title, quantity")
-      .eq("id", itemId)
+      .eq("id", item_id)
       .single();
 
   if (fetchError || !item) return res.status(400).json({ error: "Item not found" });
@@ -248,33 +283,33 @@ app.post("/inventory/remove", async (req, res) => {
   const { error: updateError } = await supabase
       .from("inventory")
       .update({ quantity: newQuantity })
-      .eq("id", itemId);
+      .eq("id", item_id);
 
   if (updateError) return res.status(500).json({ error: updateError.message });
 
-  res.json({ message: `Removed ${amount}x ${item.title} from inventory.` });
+  res.json({ message: `Removed ${amount}x ${item.title} from inventory. ${newQuantity}x ${item.title} left.` });
 });
 
 app.post("/inventory/use", async (req, res) => {
-  const { playerId, itemId } = req.body;
+  const { player_id, item_id } = req.body;
 
   const { data: item, error: fetchError } = await supabase
       .from("inventory")
       .select("title, quantity, effects")
-      .eq("id", itemId)
+      .eq("id", item_id)
       .single();
 
   if (fetchError || !item) return res.status(400).json({ error: "Item not found" });
   if (item.quantity < 1) return res.status(400).json({ error: "No items left to use" });
 
   // Apply item effects (if any)
-  await applyItemEffects(playerId, item.effects);
+  await applyItemEffects(player_id, item.effects);
 
   // Reduce inventory count
   await supabase
       .from("inventory")
       .update({ quantity: item.quantity - 1 })
-      .eq("id", itemId);
+      .eq("id", item_id);
 
   res.json({ message: `Used ${item.title}.` });
 });
