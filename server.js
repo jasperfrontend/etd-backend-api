@@ -297,7 +297,7 @@ async function applyItemEffects(playerId, effects) {
   // Log inventory usage
   await supabase.from("game_events").insert([
       {
-          game_id: activeGameId,
+          game_id: getActiveGameId,
           player_id: playerId,
           event_type: "inventory_used",
           details: {
@@ -587,22 +587,24 @@ app.post("/immune/process", async (req, res) => {
 });
 
 // 🔹 Adjust Player Health (Respects Max Health Limit)
-app.post("/health", async (req, res) => {
+app.post("/health/:player_id/:amount", async (req, res) => {
   try {
-    const { player_id, amount } = req.body;
+    const { player_id, amount } = req.params; // Read from URL params
+    const healthChange = Number(amount);
 
-    // Get current health & max health
-    const player = await pool.query("SELECT health FROM players WHERE id = $1", [player_id]);
+    if (isNaN(healthChange)) {
+      return res.status(400).json({ error: "Invalid health change value." });
+    }
 
-    if (player.rows.length === 0) {
+    // Get player's current health
+    const playerQuery = await pool.query("SELECT health FROM players WHERE id = $1", [player_id]);
+
+    if (playerQuery.rows.length === 0) {
       return res.status(404).json({ error: "Player not found." });
     }
 
-    const maxHealth = player.rows[0].health; // Use initial health as max health
-    let newHealth = maxHealth + amount; // Calculate new health
-
-    // Ensure health stays between 0 and maxHealth
-    newHealth = Math.min(maxHealth, Math.max(0, newHealth));
+    const currentHealth = playerQuery.rows[0].health;
+    const newHealth = Math.max(0, currentHealth + healthChange); // Ensure health never drops below 0
 
     // Update health in the database
     await pool.query("UPDATE players SET health = $1 WHERE id = $2", [newHealth, player_id]);
@@ -610,10 +612,10 @@ app.post("/health", async (req, res) => {
     // Log event
     await pool.query(
       "INSERT INTO game_events (game_id, player_id, event_type, details) VALUES ((SELECT id FROM game_state WHERE status = 'active' LIMIT 1), $1, 'health_change', $2)",
-      [player_id, { message: `Health changed by ${amount}, new health: ${newHealth}` }]
+      [player_id, { message: `Health changed by ${healthChange}, new health: ${newHealth}` }]
     );
 
-    res.json({ success: `Player's health adjusted by ${amount}.`, new_health: newHealth });
+    res.json({ success: `Player's health adjusted by ${healthChange}.`, new_health: newHealth });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to adjust health." });
